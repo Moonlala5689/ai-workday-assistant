@@ -1,0 +1,33 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Web.Script.Serialization;
+using WorkEnv;
+class ReadinessWfpNativeTests {
+ sealed class Fake:IVisibleWfpApi,IDisposable {
+  public uint openError,beginError,subError;public int freed,closed,aborted,destroyed;public bool hasFilter=true,invalidConditions;public WfpFilter0 filter;readonly List<IntPtr> owned=new List<IntPtr>();
+  public Fake(){var weight=Alloc(8);Marshal.WriteInt64(weight,42);filter=new WfpFilter0{key=new Guid("00000000-0000-0000-0000-000000000001"),layer=ReadinessWfpNative.OutboundIpv6,subLayer=new Guid("00000000-0000-0000-0000-000000000002"),flags=9,action=new WfpAction0{type=0x1001},effectiveWeight=new WfpValue0{type=4,value=weight}};}
+  IntPtr Alloc(int size){var p=Marshal.AllocHGlobal(size);owned.Add(p);return p;}
+  public void AddCondition(){var p=Alloc(Marshal.SizeOf(typeof(WfpCondition0)));Marshal.StructureToPtr(new WfpCondition0{field=new Guid("00000000-0000-0000-0000-000000000003"),match=0,value=new WfpValue0{type=3,value=new IntPtr(123456789)}},p,false);filter.conditionCount=1;filter.conditions=p;}
+  public uint Open(out IntPtr engine){engine=openError==0?new IntPtr(1):IntPtr.Zero;return openError;}public uint BeginRead(IntPtr e){return beginError;}public uint Create(IntPtr e,out IntPtr cursor){cursor=new IntPtr(2);return 0;}
+  public uint Next(IntPtr e,IntPtr c,uint limit,out IntPtr entries,out uint count){if(!hasFilter){entries=IntPtr.Zero;count=0;return 0;}var copy=filter;if(invalidConditions){copy.conditionCount=1;copy.conditions=IntPtr.Zero;}var f=Alloc(Marshal.SizeOf(typeof(WfpFilter0)));Marshal.StructureToPtr(copy,f,false);entries=Marshal.AllocHGlobal(IntPtr.Size);Marshal.WriteIntPtr(entries,f);count=1;return 0;}
+  public uint GetSubLayer(IntPtr e,ref Guid key,out IntPtr ptr){if(subError!=0){ptr=IntPtr.Zero;return subError;}ptr=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WfpSubLayer0)));Marshal.StructureToPtr(new WfpSubLayer0{key=key,weight=7,flags=1},ptr,false);return 0;}
+  public void Free(ref IntPtr p){if(p!=IntPtr.Zero){Marshal.FreeHGlobal(p);p=IntPtr.Zero;freed++;}}public uint Destroy(IntPtr e,IntPtr c){destroyed++;return 0;}public uint Abort(IntPtr e){aborted++;return 0;}public uint Close(IntPtr e){closed++;return 0;}public void Dispose(){foreach(var p in owned)Marshal.FreeHGlobal(p);}
+ }
+ static int total,fail;static void T(bool ok,string name){total++;if(!ok)fail++;Console.WriteLine((ok?"PASS ":"FAIL ")+name);}
+ static void Main(){T(IntPtr.Size==8&&Marshal.SizeOf(typeof(WfpFilter0))==200&&(int)Marshal.OffsetOf(typeof(WfpFilter0),"conditions")==120&&(int)Marshal.OffsetOf(typeof(WfpFilter0),"effectiveWeight")==184,"x64 FILTER 结构大小与关键偏移");T(Marshal.SizeOf(typeof(WfpCondition0))==40&&(int)Marshal.OffsetOf(typeof(WfpCondition0),"value")==24&&Marshal.SizeOf(typeof(WfpSubLayer0))==72&&(int)Marshal.OffsetOf(typeof(WfpSubLayer0),"weight")==64,"x64 条件、子层结构大小与关键偏移");
+  WfpVisibleSnapshot first;using(var f=new Fake()){first=ReadinessWfpNative.Observe(f,4,1000);T(first.complete&&first.count==1&&first.active==1&&first.block==1&&first.weightKnown==1&&first.weightMin==42&&first.subLayerKnown==1&&first.subLayerMin==7&&first.persistent==1&&first.clearAction==1,"模拟原生过滤器、有效权重、标记与子层实际解析");T(f.freed==2&&f.destroyed==1&&f.aborted==1&&f.closed==1,"模拟原生读取释放页、子层、游标及只读事务");}
+  using(var f=new Fake()){f.AddCondition();var s=ReadinessWfpNative.Observe(f,4,1000);T(s.complete&&s.conditional==1&&s.conditionCount==1&&s.conditionKinds==1&&s.matchKinds==1&&s.conditionsOpaque&&!new JavaScriptSerializer().Serialize(s).Contains("123456789"),"条件字段类型计数但不输出条件值");}
+  using(var f=new Fake()){f.filter.flags|=0x20;var s=ReadinessWfpNative.Observe(f,4,1000);T(s.complete&&s.disabled==1&&s.active==0&&s.block==0,"禁用规则不计入活动阻断");}
+  using(var f=new Fake()){f.filter.action.type=0x1002;var s=ReadinessWfpNative.Observe(f,4,1000);T(s.complete&&s.permit==1&&s.fingerprint!=first.fingerprint,"动作变化改变可见摘要");}
+  using(var f=new Fake()){f.filter.action.type=0x5003;var s=ReadinessWfpNative.Observe(f,4,1000);T(s.complete&&s.callout==1&&s.block==0&&s.contextOpaque,"调用驱动单列且未解析上下文不冒充阻断");}
+  using(var f=new Fake()){f.filter.effectiveWeight=new WfpValue0{type=0};f.subError=5;var s=ReadinessWfpNative.Observe(f,4,1000);T(s.complete&&!s.weightsComplete&&!s.subLayersComplete&&s.weightUnknown==1&&s.subLayerUnknown==1,"权重或子层读取失败保持未知");}
+  using(var f=new Fake()){f.openError=5;var s=ReadinessWfpNative.Observe(f,4,1000);T(!s.complete&&s.errorCode==5&&f.closed==0,"打开无权限保留错误码且不提权");}
+  using(var f=new Fake()){f.beginError=5;var s=ReadinessWfpNative.Observe(f,4,1000);T(!s.complete&&s.errorCode==5&&f.closed==1&&f.aborted==0,"只读事务失败仍关闭引擎");}
+  using(var f=new Fake()){f.invalidConditions=true;var s=ReadinessWfpNative.Observe(f,4,1000);T(!s.complete&&s.reason=="invalid-condition-array"&&f.closed==1,"损坏条件指针不作为有效观察");}
+  long now=Stopwatch.GetTimestamp();first.capturedTicks=now;var second=new WfpVisibleSnapshot{complete=true,weightsComplete=true,subLayersComplete=true,count=first.count,active=first.active,block=first.block,weightKnown=1,subLayerKnown=1,fingerprint=first.fingerprint,capturedTicks=now};var item=WfpVisibleEvidence.Compare(first,second);T(item.status=="unknown"&&item.failureCode=="visibility-unproven"&&item.observation.Contains("前后一致")&&item.observation.Contains("不能确认全系统"),"可见摘要一致仍不证明全系统阻断");second.conditionsOpaque=true;item=WfpVisibleEvidence.Compare(first,second);T(item.failureCode=="wfp-comparison-incomplete"&&!item.observation.Contains("摘要前后一致"),"条件值未观察不能声称稳定");second.fingerprint=new string('A',64);item=WfpVisibleEvidence.Compare(first,second);T(item.failureCode=="wfp-visible-change","部分条件未解析时仍报告已观察字段变化");second.conditionsOpaque=false;item=WfpVisibleEvidence.Compare(first,second);T(item.failureCode=="wfp-visible-change"&&item.status=="unknown","可见规则变化保留未知与变化提示");second.capturedTicks=now-31*Stopwatch.Frequency;item=WfpVisibleEvidence.Compare(second,first);T(item.failureCode=="wfp-observation-unavailable","跨越时效的快照不比较为有效");
+  string json=new JavaScriptSerializer().Serialize(first);var parsed=WfpVisibleEvidence.Parse(new WfpProcessResult{Started=true,ExitCode=0,Output=json},now);T(parsed.complete&&parsed.count==1,"父进程接收结构化摘要");parsed=WfpVisibleEvidence.Parse(new WfpProcessResult{Started=true,ExitCode=0,Output="not json"},now);T(!parsed.complete&&parsed.reason=="invalid-helper-output","父进程拒绝损坏输出");parsed=WfpVisibleEvidence.Parse(new WfpProcessResult{Started=true,TimedOut=true},now);T(!parsed.complete&&parsed.reason=="helper-timeout","父进程超时保持未知");Console.WriteLine("TOTAL "+total+" FAIL "+fail);Environment.ExitCode=fail==0?0:1;
+ }
+}
